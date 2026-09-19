@@ -1,0 +1,6 @@
+# termagent has no required third-party dependencies -- it's built entirely
+# on the Python standard library (urllib, subprocess, argparse, etc.) so
+# there's nothing to install and nothing to break across Python versions.
+#
+# Optional, if you want nicer terminal output later:
+# rich

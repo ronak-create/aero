@@ -1,0 +1,21 @@
+# Secrets -- never commit your real key.
+.env
+
+# Local session state.
+.termagent/
+
+# Python bytecode caches.
+__pycache__/
+*.py[cod]
+
+# Test scratch files.
+probe_*.txt
+tui_*_check.py
+tui_verify.*
+
+# OS/editor cruft.
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
