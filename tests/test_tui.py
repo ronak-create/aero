@@ -122,6 +122,18 @@ class TestBlocks(unittest.TestCase):
         lines = [strip_ansi(line) for line in block.render(60)]
         self.assertTrue(any("exit_code: 0" in line for line in lines))
 
+    def test_banner_art_spells_aero(self):
+        banner = BannerBlock(model="Atria-Dawn-Preview",
+                             base_url="https://api.atria-asi.ai/v1", cwd="/p")
+        # The art is read as a word, so a letter that renders wrong is a
+        # visible regression. Every row must be the same width too, or the
+        # letters lean against each other.
+        rows = banner._ART.split("\n")
+        self.assertEqual(len({len(r) for r in rows}), 1)
+        # A/E/R/O each contribute one recognizable glyph: their tops.
+        tops = rows[0]
+        self.assertEqual(tops.count("___"), 4)
+
     def test_banner_renders_stats(self):
         banner = BannerBlock(model="Atria-Dawn-Preview",
                              base_url="https://api.atria-asi.ai/v1",
