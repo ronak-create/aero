@@ -48,19 +48,47 @@ class Block:
 @dataclass
 class UserBlock(Block):
     text: str
+    # A message typed while a turn was in flight. It is already on screen but
+    # hasn't been sent: render it greyed out until the turn ends and it goes.
+    queued: bool = False
+    # The turn died before this could be sent. It stays greyed so it doesn't
+    # read as something the agent saw, with a note explaining why.
+    dropped: bool = False
 
     def render(self, width: int) -> list[str]:
+        if not self.text:
+            # An empty message has nothing to show; the caller already
+            # refuses to submit one, so this is just defensive.
+            return []
         T = _theme()
-        prefix = f"{T.user}{BOLD}you{RESET} "
+        # A dot marks the user's turn instead of a "you" label, with the
+        # prompt itself highlighted so it reads as the input. A hollow dim
+        # dot marks one that hasn't gone anywhere yet.
+        if self.queued or self.dropped:
+            marker = f"{T.muted}○{RESET}"
+            color = T.muted
+        else:
+            marker = f"{T.success}●{RESET}"
+            color = T.user
+        indent = " " * len("● ")
+        prefix = f"{marker} "
+        wrapped = _wrap(self.text, width - len("● "))
         lines = []
-        # Re-wrap the source text, then re-indent continuation lines under
-        # the "you" label so wrapped lines line up cleanly.
-        wrapped = _wrap(self.text, width - len("you "))
         for i, line in enumerate(wrapped):
             if i == 0:
-                lines.append(f"{prefix}{line}")
+                lines.append(f"{prefix}{color}{line}{RESET}")
             else:
-                lines.append(f"{' ' * len('you ')}{line}")
+                lines.append(f"{indent}{color}{line}{RESET}")
+        if self.queued:
+            lines.append(
+                f"{indent}{T.faint}(queued — sends when the current turn ends)"
+                f"{RESET}"
+            )
+        elif self.dropped:
+            lines.append(
+                f"{indent}{T.faint}(not sent — the previous turn failed)"
+                f"{RESET}"
+            )
         lines.append("")
         return lines
 
@@ -98,7 +126,9 @@ class AssistantBlock(Block):
 
     def render(self, width: int) -> list[str]:
         T = _theme()
-        label = f"{T.assistant}{BOLD}agent{RESET} "
+        # A ">" marker leads the reply, matching the input box's own prompt
+        # so a turn reads as a call and response down the left gutter.
+        label = f"{T.assistant}{BOLD}>{RESET} "
         if not self.text:
             placeholder = (
                 f"{T.warning}thinking…{RESET}" if not self.done
@@ -120,6 +150,7 @@ class ToolBlock(Block):
     status: str = "running"  # running | done | error | denied
     result: str | None = None
     expanded: bool = False
+    call_id: str = ""
     _rendered_args: str = field(default="", repr=False)
 
     def _summary(self) -> str:
@@ -193,11 +224,11 @@ class BannerBlock(Block):
     yolo: bool = False
 
     _ART = (
-        "    ___    _____   ____    ____   \n"
-        "   /   |  / ___/  / __ \\  / __ \\  \n"
-        "  / /| | / /__   / /_/ / / / / /  \n"
-        " / ___ | \\___/  / _, _/ / /_/ /   \n"
-        "/_/  |_|/____/  /_/ |_|  \\____/    "
+        "    ___    ____    _____   ____  \n"
+        "   /   |  / __ \\  / ___/  / __ \\ \n"
+        "  / /| | / /_/ / / /__   / / / / \n"
+        " / ___ |/ __  /  \\___ \\ / /_/ /  \n"
+        "/_/  |_/_/ /_/ /_____/  \\____/   "
     )
 
     def _stats(self) -> list[tuple[str, str]]:
@@ -261,6 +292,15 @@ def _visual_len(s: str) -> int:
 
 def _strip(s: str) -> str:
     return strip_ansi(s)
+
+
+def _fmt_tokens(n: int) -> str:
+    """1234 -> 1.2k; keep the header narrow on long sessions."""
+    if n < 1000:
+        return str(n)
+    if n < 1_000_000:
+        return f"{n / 1000:.1f}k"
+    return f"{n / 1_000_000:.1f}M"
 
 
 @dataclass
@@ -399,9 +439,15 @@ class TuiCallbacks(Callbacks):
             if self._current_assistant is None:
                 self._current_assistant = AssistantBlock()
                 self.app.blocks.append(self._current_assistant)
-                self.app.todo_block_index = None
             self._current_assistant.text += text
-        self.app.autoscroll = True
+            # Count what's streamed so the header's token counter climbs while
+            # the reply is being written. The endpoint only bills at the end,
+            # so this is an estimate until on_usage lands the real number.
+            self.app._in_flight_chars += len(text)
+        # NOTE: deliberately not setting autoscroll here. scroll_offset is
+        # measured from the bottom, so an offset of 0 already tracks new
+        # output; pinning unconditionally would cancel any scroll-up the
+        # user just did, the instant the model emitted another token.
         self._touch()
 
     def on_reasoning_delta(self, text: str) -> None:
@@ -410,6 +456,7 @@ class TuiCallbacks(Callbacks):
                 self._current_reasoning = ReasoningBlock()
                 self.app.blocks.append(self._current_reasoning)
             self._current_reasoning.text += text
+            self.app._in_flight_chars += len(text)
         self._touch()
 
     def on_status(self, status: str) -> None:
@@ -418,28 +465,59 @@ class TuiCallbacks(Callbacks):
             with self.app.lock:
                 self._current_assistant = None
                 self._current_reasoning = None
+                # A provider that never reports usage would otherwise leave a
+                # stale estimate climbing the header forever after the turn.
+                self.app._in_flight_chars = 0
 
-    def on_tool_start(self, name: str, args: dict) -> None:
+    def on_tool_start(self, name: str, args: dict, call_id: str = "") -> None:
         with self.app.lock:
             # A tool call interrupts an in-progress assistant message; close
             # it out so the transcript reads in order.
             self._current_assistant = None
             self._current_reasoning = None
-            block = ToolBlock(name=name, args=args)
+            block = ToolBlock(name=name, args=args, call_id=call_id)
             self.app.blocks.append(block)
             self.app.tool_blocks.append(block)
         self.app.set_status(f"running {name}")
         self._touch()
 
-    def on_tool_result(self, name: str, result: str, error: bool) -> None:
+    def on_tool_result(self, name: str, result: str, error: bool, call_id: str = "") -> None:
         with self.app.lock:
-            for block in reversed(self.app.tool_blocks):
-                if block.name == name and block.status == "running":
-                    block.status = "denied" if result.startswith("DENIED") else (
-                        "error" if error else "done"
-                    )
-                    block.result = result
-                    break
+            # Match by call_id first: two calls of the same tool can be in
+            # flight at once, and matching by name would resolve the wrong
+            # block. Fall back to name for providers that don't send ids.
+            block = None
+            if call_id:
+                block = next(
+                    (b for b in reversed(self.app.tool_blocks)
+                     if b.call_id == call_id and b.status == "running"),
+                    None,
+                )
+            if block is None:
+                block = next(
+                    (b for b in reversed(self.app.tool_blocks)
+                     if b.name == name and b.status == "running"),
+                    None,
+                )
+            if block is not None:
+                block.status = "denied" if result.startswith("DENIED") else (
+                    "error" if error else "done"
+                )
+                block.result = result
+        self.app.request_render()
+
+    def on_usage(self, usage: dict) -> None:
+        # Accumulate across the whole session, not just the last turn.
+        with self.app.lock:
+            prev = self.app.last_usage or {}
+            merged = dict(prev)
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+                if usage.get(key):
+                    merged[key] = int(merged.get(key, 0)) + int(usage[key])
+            self.app.last_usage = merged
+            # The real numbers are in, so the streamed-character estimate
+            # for this model call is no longer needed.
+            self.app._in_flight_chars = 0
         self.app.request_render()
 
     def on_approve(self, description: str) -> bool:
@@ -567,6 +645,26 @@ class InputEditor:
         self.buffer[self.row] = self.buffer[self.row][self.col :]
         self.col = 0
 
+    def delete_word_back(self) -> None:
+        """Erase the word before the caret (Ctrl+Backspace / Ctrl+W).
+
+        At the start of a line this behaves like backspace and merges the
+        line up, so the key keeps working across a paragraph break.
+        """
+        line = self.buffer[self.row]
+        if self.col == 0:
+            self.backspace()
+            return
+        # Skip back over trailing spaces, then back over the word itself.
+        start = self.col
+        while start > 0 and line[start - 1] == " ":
+            start -= 1
+        while start > 0 and line[start - 1] != " ":
+            start -= 1
+        self.buffer[self.row] = line[:start] + line[self.col :]
+        self.col = start
+        self.hist_index = -1
+
     def history_up(self) -> None:
         if not self.history:
             return
@@ -612,7 +710,6 @@ class TuiApp:
         ]
         self.blocks: list[Block] = []
         self.tool_blocks: list[ToolBlock] = []
-        self.todo_block_index: int | None = None
         self.input = InputEditor()
         self.lock = threading.RLock()
         self.render_queue: queue.Queue = queue.Queue()
@@ -620,11 +717,21 @@ class TuiApp:
         self.busy = False
         self.autoscroll = True
         self.scroll_offset = 0  # lines from the bottom; 0 = pinned to newest
+        # Scroll geometry from the last render, so the key handler can clamp
+        # without re-rendering the whole transcript on every keystroke.
+        self._scroll_total = 0
+        self._scroll_view = 3
         self.status = "idle"
         self.show_todos = True
         self.auto_approve = config.auto_approve
         self.last_usage: dict | None = None
-        self.help_visible = False
+        # Characters streamed by the model call in flight, used to estimate
+        # its tokens before the endpoint bills us for them (see _header).
+        self._in_flight_chars = 0
+        # Messages typed while a turn is in flight. Starting a second worker
+        # on the same `messages` list mid-turn would corrupt history, so these
+        # wait for the current turn to finish.
+        self._queued: list[str] = []
         # Shown in the input box when it's empty.
         self.placeholder = "ask anything…  (/ for commands)"
         # Popup menu state (slash command picker).
@@ -688,20 +795,25 @@ class TuiApp:
             return True
 
         event = threading.Event()
+        approval = {
+            "description": description,
+            "event": event,
+            "result": False,
+        }
         with self._approval_lock:
-            self._pending_approval = {
-                "description": description,
-                "event": event,
-                "result": False,
-            }
+            self._pending_approval = approval
         self.request_render()
         # Wait without hogging the GIL; the UI thread will set the event.
         while not event.wait(timeout=0.1):
             if not self.running or self._interrupt.is_set():
+                # The event never fired, so the UI thread hasn't answered --
+                # the approval is still ours to retract. (Checking the object
+                # identity guards against racing an answer that landed between
+                # the wait() timeout and this lock.)
                 with self._approval_lock:
-                    if self._pending_approval is pending:
+                    if self._pending_approval is approval:
                         self._pending_approval = None
-                self._mark_diff_block(False)
+                self._mark_diff_block(False, diff_block)
                 return False
         with self._approval_lock:
             result = self._pending_approval.get("result", False) if self._pending_approval else False
@@ -732,7 +844,9 @@ class TuiApp:
             kind = "info" if approved else "warn"
             self.blocks.append(
                 SystemBlock(text=f"{verb}: {pending['description']}", kind=kind)
-            )    # ------------------------------------------------------------- rendering
+            )
+
+    # ------------------------------------------------------------- rendering
 
     def _all_lines(self, width: int) -> list[str]:
         """Render every block to display lines."""
@@ -766,7 +880,20 @@ class TuiApp:
                 lines.extend(todo_lines)
 
         total = len(lines)
-        visible = lines[max(total - transcript_h - self.scroll_offset, 0):]
+        # autoscroll is the pin to the bottom. While it's on the view tracks
+        # the newest lines no matter what arrives -- the offset is measured
+        # from the end, so 0 already follows growth. When it's off, clamp to
+        # what actually exists so a shrinking transcript (or a narrow one)
+        # can't leave us staring past the top.
+        max_offset = max(0, total - transcript_h)
+        if self.autoscroll:
+            self.scroll_offset = 0
+        else:
+            self.scroll_offset = min(self.scroll_offset, max_offset)
+        # Remember the geometry for the scroll keys and the status bar.
+        self._scroll_total, self._scroll_view = total, transcript_h
+
+        visible = lines[total - transcript_h - self.scroll_offset :]
         visible = visible[:transcript_h]
         # Pad so the input box always sits at the same place.
         while len(visible) < transcript_h:
@@ -797,8 +924,7 @@ class TuiApp:
         # +1 for the rule line above the input body, +1 for 1-indexing.
         box_top = header_h + transcript_h + 1
         caret_row = box_top + 1 + (self.input.row - max(0, self.input.row - self._input_height() + 1))
-        wrap_col = self.input.col
-        buf.append(move_to(caret_row, 1 + len("> ") + wrap_col))
+        buf.append(move_to(caret_row, self._caret_col() + 1))
         buf.append(show_cursor())
         self._write("".join(buf))
 
@@ -816,15 +942,29 @@ class TuiApp:
         cwd = os.path.basename(os.getcwd())
         model = self.config.model
         left = (
-            f"{BOLD}{T.primary}atria{RESET}{T.primary_dim}·agent{RESET} "
+            f"{BOLD}{T.primary}AERO{RESET}{T.primary_dim}·agent{RESET} "
             f"{T.muted}{model}{RESET}"
         )
         usage = ""
         if self.last_usage:
-            usage = (
-                f" {T.faint}·{RESET} {T.muted}"
-                f"{self.last_usage.get('total_tokens', 0)} tok{RESET}"
-            )
+            total = int(self.last_usage.get("total_tokens", 0) or 0)
+            prompt = int(self.last_usage.get("prompt_tokens", 0) or 0)
+            completion = int(self.last_usage.get("completion_tokens", 0) or 0)
+            if total or prompt or completion:
+                total = total or prompt + completion
+                # A turn in flight hasn't been billed yet, so estimate its
+                # tokens from what's streamed and mark the whole count with
+                # "~" -- it's a live guess, not a reported number. The real
+                # usage replaces it the moment the endpoint sends one.
+                estimate = self._in_flight_chars // 4
+                if estimate:
+                    shown = f"~{_fmt_tokens(total + estimate)}"
+                else:
+                    shown = _fmt_tokens(total)
+                detail = ""
+                if prompt and completion:
+                    detail = f" ({_fmt_tokens(prompt)}↑ {_fmt_tokens(completion)}↓)"
+                usage = f" {T.faint}·{RESET} {T.muted}{shown} tok{detail}{RESET}"
         right = f"{T.muted}{cwd}{RESET}{usage}"
         gap = max(width - text_width(strip_ansi(left)) - text_width(strip_ansi(right)), 1)
         return left + " " * gap + right
@@ -832,19 +972,49 @@ class TuiApp:
     def _input_height(self) -> int:
         return min(max(len(self.input.buffer), 1), 6)
 
+    def _input_scroll(self, width: int) -> int:
+        """How far the caret's line is scrolled left, in characters.
+
+        A line longer than the terminal is wide would wrap at the terminal
+        level and shift the whole layout down a row, so the caret's own line
+        scrolls horizontally to keep it on screen. Other lines are clipped to
+        the width instead.
+        """
+        avail = max(width - len("> "), 1)
+        line = self.input.buffer[self.input.row]
+        if len(line) <= avail:
+            return 0
+        # Keep a little lookahead so typing at the right edge isn't jumpy.
+        return max(0, self.input.col - avail + 8)
+
+    def _caret_col(self) -> int:
+        """The caret's column on screen, after horizontal scrolling."""
+        width = max(self.cols - 2, 10)
+        return len("> ") + self.input.col - self._input_scroll(width)
+
     def _input_box(self, width: int, height: int) -> str:
         """A bordered input panel with a caret and a placeholder hint."""
         T = _theme()
         prompt = f"{T.accent}>{RESET} "
         pad = " " * (len("> "))
+        avail = max(width - len("> "), 1)
+        scroll = self._input_scroll(width)
 
         start = max(0, self.input.row - height + 1)
         shown = self.input.buffer[start : start + height]
 
         lines = []
-        empty = not self.input.text.strip()
+        # Any content at all -- including a lone space or tab -- hides the
+        # placeholder, so it never sits on top of whitespace the user typed.
+        empty = not self.input.text
         for i, line in enumerate(shown):
             display = line.replace("\t", "    ")
+            # The caret's row scrolls with the caret; every other row is
+            # clipped to the available width.
+            if start + i == self.input.row:
+                display = display[scroll : scroll + avail]
+            else:
+                display = display[:avail]
             if i == 0:
                 if empty:
                     lines.append(
@@ -864,9 +1034,6 @@ class TuiApp:
         """The input box as one entry per visual row (for the write loop)."""
         return self._input_box(width, height).split("\n")
 
-    def _input_box_height(self) -> int:
-        return self._input_height() + 1
-
     def _status_bar(self, width: int) -> str:
         T = _theme()
         with self._approval_lock:
@@ -882,6 +1049,9 @@ class TuiApp:
         if self.busy:
             spinner = SPINNER[self._frame % len(SPINNER)]
             status = {"thinking": "thinking…"}.get(self.status, self.status)
+            held = len(self._queued)
+            if held:
+                status = f"{status} · {held} queued"
             left = f"{T.primary}{spinner}{RESET} {T.muted}{status}{RESET}"
         elif self.auto_approve:
             left = (
@@ -889,11 +1059,30 @@ class TuiApp:
             )
         else:
             left = f"{T.muted}ready{RESET}"
-        hint = (
-            f"{T.faint}enter send · ctrl+j newline · ctrl+c interrupt · "
-            f"/ for commands{RESET}"
-        )
-        gap = max(width - text_width(strip_ansi(left)) - text_width(strip_ansi(hint)), 1)
+        if self.scroll_offset > 0 and self._scroll_total > self._scroll_view:
+            # How far through the history the top of the viewport sits, as a
+            # percentage of the scrollable range: 0 is pinned to the newest.
+            span = self._scroll_total - self._scroll_view
+            pct = round((span - self.scroll_offset) / span * 100)
+            hint = (
+                f"{T.faint}history {pct}% · shift+↑/↓ scrolls · "
+                f"ctrl+l back to newest{RESET}"
+            )
+        else:
+            hint = (
+                f"{T.faint}enter send · ↑/↓ scroll · ctrl+p/n history · "
+                f"esc interrupt · / for commands{RESET}"
+            )
+        # A status bar longer than the row would wrap at the terminal level
+        # and shove the input box down a line, so clip to the width: first
+        # the hint, then -- if even the status alone doesn't fit -- it.
+        left_w = text_width(strip_ansi(left))
+        if left_w >= width - 1:
+            return _truncate_visual(left, width)
+        room = width - left_w - 1
+        if text_width(strip_ansi(hint)) > room:
+            hint = _truncate_visual(hint, room)
+        gap = max(width - left_w - text_width(strip_ansi(hint)), 1)
         return left + " " * gap + hint
 
     # ------------------------------------------------------------- command menu
@@ -948,21 +1137,14 @@ class TuiApp:
 
         if key.name == "ctrl_c":
             if self.busy:
-                # Ask the worker to stop after the current request, and drop
-                # any pending tool calls it hasn't run yet.
-                self._interrupt.set()
-                self.set_status("interrupting…")
-                with self.lock:
-                    self.blocks.append(SystemBlock(
-                        text="Interrupt requested — stopping after the current "
-                             "request. Press Ctrl+C again to force-quit.",
-                        kind="warn",
-                    ))
-                self.request_render()
+                self._request_interrupt(
+                    "Interrupt requested — stopping after the current "
+                    "request. Press Ctrl+C again to force-quit."
+                )
                 return True
             return False
         if key.name == "ctrl_d":
-            if not self.input.text.strip():
+            if not self.input.text:
                 return False
             self.input.delete()
             self.request_render()
@@ -972,19 +1154,25 @@ class TuiApp:
                 self.menu_visible = False
                 self.request_render()
                 return True
-            self.request_render()
+            if self.busy:
+                # ESC interrupts the running request, same as Ctrl+C but
+                # without the force-quit second press.
+                self._request_interrupt("Interrupted with ESC.")
+                return True
+            # Idle: clear the draft so ESC works as a "cancel what I typed".
+            if self.input.text:
+                self.input = InputEditor()
+                self.menu_visible = False
+                self.request_render()
             return True
 
         if key.name == "enter":
-            # Plain enter sends; multi-line via alt+enter or ctrl+j.
             self.submit()
             self.request_render()
             return True
-        if key.name in ("alt_enter", "ctrl_j"):
-            self.input.newline()
-            self.request_render()
-            return True
-        if key.name == "alt_enter":
+        # Shift+Enter inserts a newline. (Alt+Enter is kept as an alias for
+        # the terminals where Shift+Enter isn't distinguishable from Enter.)
+        if key.name in ("shift_enter", "alt_enter"):
             self.input.newline()
             self.request_render()
             return True
@@ -1010,11 +1198,13 @@ class TuiApp:
                 self.menu_index = (self.menu_index - 1) % len(self.menu)
                 self.request_render()
                 return True
+            # In a multi-line draft the arrows still move the caret between
+            # rows. A single-line draft has nowhere to go, so the key scrolls
+            # the transcript instead -- it's what the chat is for.
             if self.input.move_up():
-                pass
+                self.request_render()
             else:
-                self.input.history_up()
-            self.request_render()
+                self._scroll_by(1)
             return True
         if key.name == "down":
             if self.menu_visible:
@@ -1022,9 +1212,20 @@ class TuiApp:
                 self.request_render()
                 return True
             if self.input.move_down():
-                pass
+                self.request_render()
             else:
-                self.input.history_down()
+                self._scroll_by(-1)
+            return True
+        # History recall. Plain arrows used to do this, which made the chat
+        # unscrollable from the keyboard; Ctrl+P/N is the readline binding and
+        # arrives as a plain control char, so it works on every terminal
+        # including the Windows console, where modified arrows don't.
+        if key.name == "ctrl_p":
+            self.input.history_up()
+            self.request_render()
+            return True
+        if key.name == "ctrl_n":
+            self.input.history_down()
             self.request_render()
             return True
         if key.name == "home":
@@ -1036,14 +1237,27 @@ class TuiApp:
             self.request_render()
             return True
         if key.name == "pageup":
-            self.scroll_offset = min(self.scroll_offset + 10, 1000)
-            self.autoscroll = False
-            self.request_render()
+            self._scroll_by(10)
             return True
         if key.name == "pagedown":
-            self.scroll_offset = max(self.scroll_offset - 10, 0)
-            self.autoscroll = self.scroll_offset == 0
-            self.request_render()
+            self._scroll_by(-10)
+            return True
+        # Shift+arrows always scroll a line, even inside a multi-line draft
+        # where the plain arrows are moving the caret. Ctrl+arrows are the
+        # same on terminals that send them.
+        if key.name in ("shift_up", "ctrl_up"):
+            self._scroll_by(1)
+            return True
+        if key.name in ("shift_down", "ctrl_down"):
+            self._scroll_by(-1)
+            return True
+        # Home/End jump the view to the oldest / newest history while their
+        # plain forms keep moving the caret, same as the arrows above.
+        if key.name in ("shift_home", "ctrl_home"):
+            self._scroll_to(-1)
+            return True
+        if key.name in ("shift_end", "ctrl_end"):
+            self._scroll_to(0)
             return True
         if key.name in ("ctrl_l",):
             self.scroll_offset = 0
@@ -1056,6 +1270,14 @@ class TuiApp:
             return True
         if key.name == "ctrl_k":
             self.input.kill_to_end()
+            self.request_render()
+            return True
+        # Ctrl+Backspace and Ctrl+W both erase the word behind the caret.
+        # Terminals encode Ctrl+Backspace several different ways (see term.py),
+        # so both names route to the same behavior.
+        if key.name in ("ctrl_backspace", "ctrl_w"):
+            self.input.delete_word_back()
+            self._update_menu()
             self.request_render()
             return True
 
@@ -1080,6 +1302,26 @@ class TuiApp:
             self.request_render()
             return True
         return True
+
+    def _scroll_by(self, delta: int) -> None:
+        """Move the transcript view by `delta` lines (negative = newer).
+
+        Clamps against the geometry the last render measured, so the offset
+        can't outrun the content, and pins back to the bottom once it lands
+        there -- autoscroll is what keeps the view tracking new output.
+        """
+        max_offset = max(0, self._scroll_total - self._scroll_view)
+        self.scroll_offset = max(0, min(self.scroll_offset + delta, max_offset))
+        self.autoscroll = self.scroll_offset == 0
+        self.request_render()
+
+    def _scroll_to(self, offset: int) -> None:
+        """Jump to a scroll position: 0 is newest, -1 is the very top."""
+        max_offset = max(0, self._scroll_total - self._scroll_view)
+        target = max_offset if offset < 0 else min(offset, max_offset)
+        self.scroll_offset = target
+        self.autoscroll = target == 0
+        self.request_render()
 
     def _autocomplete(self) -> None:
         line = self.input.buffer[self.input.row]
@@ -1108,11 +1350,74 @@ class TuiApp:
             if self._run_slash_command(text):
                 return
         with self.lock:
-            self.blocks.append(UserBlock(text=text))
+            self.blocks.append(UserBlock(text=text, queued=self.busy))
         self.autoscroll = True
+        if self.busy:
+            # A turn is in flight: hold this until it lands. Running two
+            # workers on the same history at once would interleave their
+            # edits to `messages` and corrupt the conversation. The block
+            # is already on screen, greyed out, so the user can see it
+            # was heard rather than silently swallowed.
+            with self.lock:
+                self._queued.append(text)
+            self.request_render()
+            return
+        self._dispatch(text)
+
+    def _dispatch(self, text: str) -> None:
         self.messages.append({"role": "user", "content": text})
         self._interrupt.clear()
         threading.Thread(target=self._run_agent, daemon=True).start()
+
+    def _request_interrupt(self, message: str) -> None:
+        """Ask the worker to stop after the current request."""
+        self._interrupt.set()
+        self.set_status("interrupting…")
+        with self.lock:
+            self.blocks.append(SystemBlock(text=message, kind="warn"))
+        self.request_render()
+
+    def _dispatch_next(self) -> None:
+        """Send the next held message, or return to idle."""
+        if not self.running:
+            self.set_status("idle")
+            return
+        with self.lock:
+            next_text = self._queued.pop(0) if self._queued else None
+        if next_text is None:
+            self.set_status("idle")
+            self.request_render()
+            return
+        self._unqueue(next_text)
+        self._dispatch(next_text)
+
+    def _unqueue(self, text: str) -> None:
+        """Mark a held message as actually sent: it stops being greyed out.
+
+        The queue is FIFO, so the oldest greyed block is the one going out;
+        matching on the text first keeps two identical messages in order.
+        """
+        with self.lock:
+            target = None
+            for block in self.blocks:
+                if isinstance(block, UserBlock) and block.queued:
+                    if block.text == text:
+                        target = block
+                        break
+                    if target is None:
+                        target = block
+            if target is not None:
+                target.queued = False
+        self.autoscroll = True
+
+    def _drop_queue(self) -> None:
+        """A turn died with messages still held: they will never be sent."""
+        with self.lock:
+            for block in self.blocks:
+                if isinstance(block, UserBlock) and block.queued:
+                    block.queued = False
+                    block.dropped = True
+        self._queued.clear()
 
     def _run_slash_command(self, text: str) -> bool:
         """Returns True if the input was consumed as a command."""
@@ -1133,12 +1438,19 @@ class TuiApp:
             for name, desc in sorted(SLASH_COMMANDS.items()):
                 lines.append(f"  {FG.BRIGHT_CYAN}{name:<10}{RESET} {desc}")
             lines.append("")
-            lines.append("  PageUp/PageDown scrolls history · Tab completes commands")
+            lines.append(
+                "  ↑/↓ or PageUp/PageDown scrolls the transcript (ctrl+l jumps\n"
+                "  to the newest lines) · ctrl+p/ctrl+n recalls what you typed\n"
+                "  · Tab completes commands"
+            )
             with self.lock:
                 self.blocks.append(SystemBlock(text="\n".join(lines)))
             self.autoscroll = True
             return True
         if cmd == "/clear":
+            if self.busy:
+                say("wait for the current turn to finish before /clear", kind="warn")
+                return True
             self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
             with self.lock:
                 self.blocks = []
@@ -1210,6 +1522,9 @@ class TuiApp:
             if not rest:
                 say("usage: /load <name>", kind="warn")
                 return True
+            if self.busy:
+                say("wait for the current turn to finish before /load", kind="warn")
+                return True
             from cli import SESSIONS_DIR
 
             src = SESSIONS_DIR / f"{rest[0]}.json"
@@ -1231,11 +1546,15 @@ class TuiApp:
         try:
             reply = run_turn(
                 self.client, self.messages, cb, self.config.max_iterations,
-                stream=True, interrupt=self._interrupt,
+                stream=True, temperature=self.config.temperature,
+                interrupt=self._interrupt,
             )
         except Exception as e:  # noqa: BLE001 - never let the worker kill the UI
             with self.lock:
                 self.blocks.append(SystemBlock(text=f"agent crashed: {e}", kind="error"))
+            # Held messages can never go out now; mark them so they don't
+            # sit greyed with no turn left to carry them.
+            self._drop_queue()
             self.set_status("idle")
             self.request_render()
             return
@@ -1244,9 +1563,9 @@ class TuiApp:
                 self.blocks.append(SystemBlock(
                     text="[interrupted by user]", kind="warn",
                 ))
-            # Don't echo a partial reply as if it were final.
-            self.set_status("idle")
-            self.request_render()
+            # Don't echo a partial reply as if it were final, but still send
+            # anything the user queued behind the interrupted turn.
+            self._dispatch_next()
             return
         # Streaming already carried the reply into an AssistantBlock; mark it
         # final and DON'T append a second copy (that was the duplicate echo).
@@ -1257,8 +1576,7 @@ class TuiApp:
                 last.done = True
             elif reply:
                 self.blocks.append(AssistantBlock(text=reply, done=True))
-        self.set_status("idle")
-        self.request_render()
+        self._dispatch_next()
 
     # ------------------------------------------------------------- main loop
 

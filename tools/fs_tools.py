@@ -84,6 +84,27 @@ def list_dir(path: str = ".") -> str:
     return "\n".join(lines) if lines else "(empty directory)"
 
 
+def _match_glob(rel: str, name: str, pattern: str) -> bool:
+    """
+    Match a relative path against a glob pattern.
+
+    Two accommodations beyond plain fnmatch:
+      - The path is normalized to "/" so a pattern written the portable way
+        ("**/*.py") still matches on Windows, where os.path.relpath yields
+        backslash-joined paths.
+      - A leading "**/" is allowed to match zero directories, so "**/*.py"
+        finds top-level files too -- the convention most tools use.
+    """
+    norm = rel.replace(os.sep, "/")
+    patterns = [pattern]
+    if pattern.startswith("**/"):
+        patterns.append(pattern[3:])
+    return any(
+        fnmatch.fnmatch(norm, pat) or fnmatch.fnmatch(name, pat)
+        for pat in patterns
+    )
+
+
 def glob_search(pattern: str, path: str = ".") -> str:
     root = Path(path).expanduser()
     matches = []
@@ -92,7 +113,7 @@ def glob_search(pattern: str, path: str = ".") -> str:
         for name in filenames:
             full = os.path.join(dirpath, name)
             rel = os.path.relpath(full, root)
-            if fnmatch.fnmatch(rel, pattern) or fnmatch.fnmatch(name, pattern):
+            if _match_glob(rel, name, pattern):
                 matches.append(rel)
         if len(matches) > 500:
             break

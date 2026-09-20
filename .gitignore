@@ -12,6 +12,7 @@ __pycache__/
 probe_*.txt
 tui_*_check.py
 tui_verify.*
+tests/_scratch_*/
 
 # OS/editor cruft.
 .DS_Store

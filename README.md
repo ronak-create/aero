@@ -61,13 +61,13 @@ reported with a live status marker:
 │                                        mode      confirm                │
 └──────────────────────────────────────────────────────────────────────────┘
 
-you  Refactor the auth module to use the new token format.
+● Refactor the auth module to use the new token format.
 ⌁ reasoning  The user wants to refactor auth… I should read it first.
   ✓ read_file  src/auth.py
-agent I've updated `src/auth.py` to use the new token format…
+> I've updated `src/auth.py` to use the new token format…
 ──────────────────────────────────────────────────────────────────────────
 > ask anything…  (/ for commands)
-ready          enter send · ctrl+j newline · ctrl+c interrupt · / for commands
+ready          enter send · ↑/↓ scroll · ctrl+p/n history · esc interrupt · /
 ```
 
 When the agent wants to edit a file, the change is shown as a colored diff
@@ -89,15 +89,36 @@ Keyboard:
 | Key | Action |
 |---|---|
 | `Enter` | send the message |
-| `Ctrl+J` | insert a newline (multi-line input) |
-| `Up` / `Down` | move the caret, or walk input history when at the top/bottom |
+| `Shift+Enter` | insert a newline (multi-line input) |
+| `Esc` | interrupt the current request; clear the input when idle |
+| `Up` / `Down` | scroll the transcript, or move the caret in a multi-line draft |
+| `Shift`+`Up` / `Down` | scroll the transcript one line |
+| `Shift`+`Home` / `End` | jump the transcript to the oldest / newest lines |
 | `Left` / `Right` / `Home` / `End` | move the caret |
 | `Ctrl+U` / `Ctrl+K` | delete to start / end of line |
+| `Ctrl+Backspace` / `Ctrl+W` | delete the word behind the caret |
+| `Ctrl+P` / `Ctrl+N` | recall the previous / next thing you typed |
 | `Backspace` / `Delete` | edit |
 | `Tab` | complete a `/` command |
-| `PageUp` / `PageDown` / `Ctrl+L` | scroll and reset the transcript |
+| `PageUp` / `PageDown` | scroll the transcript a page |
+| `Ctrl+L` | jump back to the newest lines |
 | `Ctrl+C` | interrupt the current request, then quit when idle |
 | `Ctrl+D` | quit (or delete forward if the input is non-empty) |
+
+The transcript scrolls independently of the agent: once you scroll up, new
+output stops dragging the view back down, and the status bar shows how far
+through the history you are. `Ctrl+L` (or scrolling back to the bottom)
+re-pins it.
+
+If you type while the agent is still working, your message is shown greyed out
+with a hollow marker and held until the current turn finishes, then sent —
+the status bar shows a `queued` count. Starting a second worker on the same
+history mid-turn would corrupt the conversation, so this is the safe path.
+If the turn dies instead of finishing, the held message is marked
+`not sent` rather than quietly vanishing.
+
+The header keeps a running token total for the session — `1.5k tok (600↑ 900↓)`
+— reported from the endpoint's usage accounting.
 
 When the agent wants to write a file, edit a file, or run a shell command,
 the status bar shows the request and waits for `y` / `n` — unless `--yolo` or
@@ -128,10 +149,22 @@ python cli.py --yolo      # or /yolo inside the TUI
 Skips confirmation prompts for file writes, edits, and shell commands.
 Use with real caution -- this removes your safety net.
 
+### Tuning the loop
+
+```bash
+python cli.py --max-iterations 50 --timeout 180 --temperature 0.4
+```
+
+Or set them once in `.env`: `ATRIA_MAX_ITERATIONS`, `ATRIA_TIMEOUT`,
+`ATRIA_TEMPERATURE`. Command-line flags win over the environment, and a
+value that isn't a number falls back to the default with a warning rather
+than being ignored silently.
+
 ### Slash commands
 
 `/help`, `/clear`, `/save <name>`, `/load <name>`, `/plugins`, `/todos`,
-`/yolo`, `/model`, `/tui`, `/exit`.
+`/yolo`, `/model`, `/tui`, `/exit`. These work the same in both the TUI and
+the line-mode REPL.
 
 ## What it can do
 
@@ -184,7 +217,23 @@ llm_client.py   HTTP client for the model API (the file to edit if the API
 config.py       env var / .env loading
 tools/          built-in tool implementations + the schema/plugin registry
 plugins/        drop-in extra tools
+tests/          the test suite (see below)
 ```
+
+## Tests
+
+```bash
+python run_tests.py          # everything, stdlib only
+python run_tests.py -v       # per-test output
+```
+
+No third-party runner required, though `python -m pytest tests/` works too.
+The suite covers the terminal layer (wrapping, widths, key decoding), the
+filesystem tools against real temp files, diff and markdown rendering, the
+LLM client against a stubbed HTTP layer (SSE parsing, tool-call accumulation,
+model resolution, retry), the plugin loader, and the agent loop end to end
+against a scripted fake model -- including the approval gate, the iteration
+cap, and interrupt handling.
 
 ## Endpoint notes
 

@@ -34,6 +34,7 @@ class Config:
     auto_approve: bool = False
     max_iterations: int = 25
     request_timeout: int = 120
+    temperature: float = 0.2
 
     @classmethod
     def load(cls, cli_overrides: dict | None = None) -> "Config":
@@ -65,5 +66,41 @@ class Config:
             api_key=api_key,
             base_url=base_url,
             model=model,
-            auto_approve=cli_overrides.get("auto_approve", False),
+            auto_approve=bool(cli_overrides.get("auto_approve", False)),
+            max_iterations=_int_env(
+                cli_overrides.get("max_iterations"), "ATRIA_MAX_ITERATIONS", 25
+            ),
+            request_timeout=_int_env(
+                cli_overrides.get("request_timeout"), "ATRIA_TIMEOUT", 120
+            ),
+            temperature=_float_env(
+                cli_overrides.get("temperature"), "ATRIA_TEMPERATURE", 0.2
+            ),
         )
+
+
+def _int_env(cli_value, name: str, default: int) -> int:
+    """CLI flag wins, then env var, then the default. Bad values fall back."""
+    for raw in (cli_value, os.environ.get(name)):
+        if raw in (None, ""):
+            continue
+        try:
+            value = int(str(raw))
+        except ValueError:
+            print(f"[config] ignoring bad {name}={raw!r} (expected an integer)")
+            continue
+        return max(value, 1)
+    return default
+
+
+def _float_env(cli_value, name: str, default: float) -> float:
+    for raw in (cli_value, os.environ.get(name)):
+        if raw in (None, ""):
+            continue
+        try:
+            value = float(str(raw))
+        except ValueError:
+            print(f"[config] ignoring bad {name}={raw!r} (expected a number)")
+            continue
+        return max(min(value, 2.0), 0.0)
+    return default

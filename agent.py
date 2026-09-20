@@ -39,10 +39,14 @@ class Callbacks:
 
     on_content_delta: Callable[[str], None] = lambda _t: None
     on_reasoning_delta: Callable[[str], None] = lambda _t: None
-    # (name, args) when the model requests a tool, before it runs.
-    on_tool_start: Callable[[str, dict], None] = lambda _n, _a: None
-    # (name, result, error?) when the tool has finished.
-    on_tool_result: Callable[[str, str, bool], None] = lambda _n, _r, _e: None
+    # (name, args, call_id) when the model requests a tool, before it runs.
+    # call_id is the provider's tool-call id; it disambiguates two concurrent
+    # calls of the same tool when correlating starts to results.
+    on_tool_start: Callable[[str, dict, str], None] = lambda _n, _a, _i: None
+    # (name, result, error?, call_id) when the tool has finished.
+    on_tool_result: Callable[[str, str, bool, str], None] = lambda _n, _r, _e, _i: None
+    # Token accounting for the turn, if the endpoint reports it.
+    on_usage: Callable[[dict], None] = lambda _u: None
     # A transient status line ("thinking", "running X", ...).
     on_status: Callable[[str], None] = lambda _s: None
     # Ask the user to approve a destructive action. Must return True/False.
@@ -110,6 +114,7 @@ def _stream_turn(
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
     tool_calls: list[dict[str, Any]] = []
+    usage: dict[str, Any] | None = None
 
     for delta in client.stream(messages, tools=BUILTIN_TOOLS, temperature=temperature):
         if delta["reasoning"]:
@@ -120,9 +125,15 @@ def _stream_turn(
             cb.on_content_delta(delta["content"])
         if delta["tool_calls"]:
             accumulate_tool_calls(tool_calls, delta["tool_calls"])
+        # Usage (when the endpoint reports it) rides on the final chunk.
+        if delta.get("usage"):
+            usage = delta["usage"]
         # Let Ctrl+C cut a long response short rather than reading it all.
         if interrupt is not None and interrupt.is_set():
             break
+
+    if usage:
+        cb.on_usage(usage)
 
     content = "".join(content_parts) or None
     reasoning = "".join(reasoning_parts) or None
@@ -142,6 +153,8 @@ def _blocked_turn(
         cb.on_reasoning_delta(response.reasoning)
     if response.content:
         cb.on_content_delta(response.content)
+    if response.usage:
+        cb.on_usage(response.usage)
     return response.content, response.tool_calls, response.reasoning
 
 
@@ -204,24 +217,22 @@ def run_turn(
         for call in tool_calls:
             fn = call["function"]
             name = fn["name"]
+            call_id = call.get("id", "")
             try:
                 args = json.loads(fn.get("arguments") or "{}")
             except json.JSONDecodeError:
                 args = {}
                 cb.on_warning(f"model sent invalid JSON arguments for {name}")
 
-            cb.on_tool_start(name, args)
+            cb.on_tool_start(name, args, call_id)
             result_text, image_uri = execute_tool(name, args, cb)
-            cb.on_tool_result(
-                name,
-                result_text if not result_text.startswith(("ERROR", "DENIED")) else result_text,
-                result_text.startswith(("ERROR", "DENIED")),
-            )
+            is_error = result_text.startswith(("ERROR", "DENIED"))
+            cb.on_tool_result(name, result_text, is_error, call_id)
 
             messages.append(
                 {
                     "role": "tool",
-                    "tool_call_id": call.get("id", ""),
+                    "tool_call_id": call_id,
                     "name": name,
                     "content": _truncate(result_text),
                 }

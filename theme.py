@@ -24,7 +24,7 @@ class Theme:
 
     # Roles
     user = _r(129, 200, 255)           # "you" label
-    assistant = _r(169, 143, 255)      # "agent" label
+    assistant = _r(169, 143, 255)      # agent replies
     reasoning = _r(122, 133, 168)      # dim slate -- internal monologue
     success = _r(74, 222, 166)         # teal-green -- done, additions
     warning = _r(251, 191, 84)         # amber -- approvals, caution

@@ -36,6 +36,7 @@ class LLMResponse:
     content: str | None
     tool_calls: list[dict[str, Any]]
     reasoning: str | None = None
+    usage: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -150,6 +151,7 @@ class LLMClient:
             content=choice.get("content"),
             tool_calls=choice.get("tool_calls") or [],
             reasoning=choice.get("reasoning_content"),
+            usage=raw.get("usage") or {},
             raw=raw,
         )
 
@@ -172,6 +174,10 @@ class LLMClient:
             "messages": messages,
             "temperature": temperature,
             "stream": True,
+            # Ask for token accounting on the final chunk. Endpoints that
+            # ignore this just won't send a usage object, and the UI falls
+            # back to showing no counts rather than breaking.
+            "stream_options": {"include_usage": True},
         }
         if tools:
             payload["tools"] = tools
@@ -194,12 +200,15 @@ class LLMClient:
                     continue
                 choice = (chunk.get("choices") or [{}])[0]
                 delta = choice.get("delta") or {}
-                if delta or choice.get("finish_reason"):
+                # A usage-only chunk (empty choices) is the terminal accounting
+                # frame on endpoints that honor include_usage.
+                if delta or choice.get("finish_reason") or chunk.get("usage"):
                     yield {
                         "content": delta.get("content") or "",
                         "reasoning": delta.get("reasoning_content") or "",
                         "tool_calls": delta.get("tool_calls") or [],
                         "finish_reason": choice.get("finish_reason"),
+                        "usage": chunk.get("usage"),
                         "raw": chunk,
                     }
         finally:

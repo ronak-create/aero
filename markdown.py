@@ -61,11 +61,15 @@ def _render_code_block(lines: list[str], info: str, width: int) -> list[str]:
         out.append(f"{CODE_BORDER}┌{RESET} {T.code_tag}{label}{RESET}")
         out.append(f"{CODE_BORDER}│{RESET}{bar}")
     else:
-        out.append(f"{CODE_BORDER}┌{bar[0]}{RESET}")
+        # bar[0] would be the ANSI escape, not the rule glyph -- spell the
+        # border out so an unlabeled block still gets a full top edge.
+        out.append(f"{CODE_BORDER}┌{'┄' * (inner_w + 2)}{RESET}")
     for line in lines:
-        # Truncate long lines rather than wrapping code.
+        # Truncate long lines rather than wrapping code. The ellipsis is a
+        # display column of its own, so cut at inner_w - 1 or the panel
+        # overflows the terminal width by one character.
         if text_width(strip_ansi(line)) > inner_w:
-            while text_width(strip_ansi(line)) > inner_w and line:
+            while text_width(strip_ansi(line)) > inner_w - 1 and line:
                 line = line[:-1]
             line += f"{RESET}{T.muted}…{RESET}"
         out.append(
