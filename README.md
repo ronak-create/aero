@@ -53,12 +53,12 @@ reported with a live status marker:
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│     ___    _____   ____    ____        model     Atria-Dawn-Preview      │
-│    /   |  / ___/  / __ \  / __ \       endpoint  api.atria-asi.ai        │
-│   / /| | / /__   / /_/ / / / / /       cwd       …termagent/termagent   │
-│  / ___ | \___/  / _, _/ / /_/ /        tools     11 builtin             │
-│ /_/  |_|/____/  /_/ |_|  \____/        plugins   none                   │
-│                                        mode      confirm                │
+│      _    _____ ____   ___       model     Atria-Dawn-Preview           │
+│     / \  | ____|  _ \ / _ \      endpoint  api.atria-asi.ai             │
+│    / _ \ |  _| | |_) | | | |     cwd       …termagent/termagent        │
+│   / ___ \| |___|  _ <| |_| |     tools     11 builtin                  │
+│  /_/   \_\_____|_| \_\\___/      plugins   none                        │
+│                                   mode      confirm                     │
 └──────────────────────────────────────────────────────────────────────────┘
 
 ● Refactor the auth module to use the new token format.

@@ -6,7 +6,7 @@ A plugin defines either:
   - a module-level TOOLS list of (schema, function) pairs (multiple tools), or
   - a module-level SCHEMA dict + run() function (a single tool), as shown here.
 
-This one is a stub (no real weather API call) just to show the shape.
+This one is a simple character counter to demonstrate the plugin shape.
 """
 
 SCHEMA = {

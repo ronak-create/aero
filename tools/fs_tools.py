@@ -76,8 +76,16 @@ def list_dir(path: str = ".") -> str:
         return f"ERROR: {path} is not a directory"
     entries = sorted(p.iterdir(), key=lambda e: (e.is_file(), e.name.lower()))
     lines = []
+    # Show important dotfiles that matter for project configuration.
+    _VISIBLE_DOTFILES = {
+        ".env", ".gitignore", ".eslintrc", ".eslintrc.js", ".eslintrc.json",
+        ".prettierrc", ".prettierrc.js", ".prettierrc.json", ".editorconfig",
+        ".dockerignore", ".npmrc", ".nvmrc", ".python-version", ".tool-versions",
+        ".flake8", ".pylintrc", ".mypy.ini", ".isort.cfg", ".stylelintrc",
+        ".babelrc", ".browserslistrc", ".env.example", ".env.local",
+    }
     for e in entries:
-        if e.name.startswith(".") and e.name not in (".env",):
+        if e.name.startswith(".") and e.name not in _VISIBLE_DOTFILES:
             continue
         tag = "/" if e.is_dir() else ""
         lines.append(f"{e.name}{tag}")

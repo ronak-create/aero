@@ -70,7 +70,7 @@ class TestKeyClassification(unittest.TestCase):
         self.assertEqual(_classify("\x15").name, "ctrl_u")
         self.assertEqual(_classify("\x0a").name, "ctrl_j")
 
-    def test_backspace_encodings(self):
+    def test_backspace_x08_is_backspace(self):
         # \x08 is the plain Backspace key on every platform.
         self.assertEqual(_classify("\x08").name, "backspace")
 
@@ -83,8 +83,8 @@ class TestKeyClassification(unittest.TestCase):
         # Enter or the documented "ctrl+j inserts a newline" breaks.
         self.assertEqual(_classify("\x0a").name, "ctrl_j")
 
-    def test_backspace_encodings(self):
-        # \x08 is the plain Backspace key on every platform.
+    def test_backspace_x08_repeated_check(self):
+        # Redundant with above; kept for completeness.
         self.assertEqual(_classify("\x08").name, "backspace")
 
     def test_backspace_x7f_is_platform_specific(self):

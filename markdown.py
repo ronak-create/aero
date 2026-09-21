@@ -92,7 +92,6 @@ def render_markdown(text: str, width: int) -> list[str]:
     lines: list[str] = []
     src = text.split("\n")
     i = 0
-    in_table = False
 
     while i < len(src):
         raw = src[i]

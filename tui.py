@@ -224,11 +224,11 @@ class BannerBlock(Block):
     yolo: bool = False
 
     _ART = (
-        "    ___    _____    ____      ___  \n"
-        "   /   |  | ___ \\  / __ \\    / _ \\ \n"
-        "  / /| |  | |_/ / / /_/ /   / ___ \\\n"
-        " / ___ |  |  _  | \\__,  /  / /   \\ \n"
-        "/_/  |_|  |_| |_|    /_/   \\_____/ "
+        "     _    _____ ____   ___  \n"
+        "    / \\  | ____|  _ \\ / _ \\ \n"
+        "   / _ \\ |  _| | |_) | | | |\n"
+        "  / ___ \\| |___|  _ <| |_| |\n"
+        " /_/   \\_\\_____|_| \\_\\\\___/ "
     )
 
     def _stats(self) -> list[tuple[str, str]]:
@@ -408,8 +408,11 @@ SLASH_COMMANDS = {
     "/plugins": "list plugin tools",
     "/todos": "toggle todo panel",
     "/expand": "toggle reasoning",
+    "/compact": "toggle tool details",
     "/yolo": "toggle auto-approve",
     "/model": "show model info",
+    "/context": "show session stats",
+    "/cost": "estimate token cost",
 }
 
 
@@ -723,6 +726,7 @@ class TuiApp:
         self._scroll_view = 3
         self.status = "idle"
         self.show_todos = True
+        self.compact_tools = False
         self.auto_approve = config.auto_approve
         self.last_usage: dict | None = None
         # Characters streamed by the model call in flight, used to estimate
@@ -733,7 +737,7 @@ class TuiApp:
         # wait for the current turn to finish.
         self._queued: list[str] = []
         # Shown in the input box when it's empty.
-        self.placeholder = "ask anything…  (/ for commands)"
+        self.placeholder = "ask anything…  (/ for commands, shift+enter for newline)"
         # Popup menu state (slash command picker).
         self.menu: list[tuple[str, str]] = []
         self.menu_index = 0
@@ -942,8 +946,8 @@ class TuiApp:
         cwd = os.path.basename(os.getcwd())
         model = self.config.model
         left = (
-            f"{BOLD}{T.primary}AERO{RESET}{T.primary_dim}·agent{RESET} "
-            f"{T.muted}{model}{RESET}"
+            f"{BOLD}{T.primary}AERO{RESET}{T.primary_dim}.agent{RESET} "
+            f"{T.muted}⟨{model}⟩{RESET}"
         )
         usage = ""
         if self.last_usage:
@@ -1070,8 +1074,8 @@ class TuiApp:
             )
         else:
             hint = (
-                f"{T.faint}enter send · ↑/↓ scroll · ctrl+p/n history · "
-                f"esc interrupt · / for commands{RESET}"
+                f"{T.faint}enter send · shift+enter newline · ↑/↓ scroll · "
+                f"/ commands{RESET}"
             )
         # A status bar longer than the row would wrap at the terminal level
         # and shove the input box down a line, so clip to the width: first
@@ -1434,14 +1438,15 @@ class TuiApp:
             self.running = False
             return True
         if cmd == "/help":
-            lines = ["termagent commands", ""]
+            lines = ["AERO commands", ""]
             for name, desc in sorted(SLASH_COMMANDS.items()):
-                lines.append(f"  {FG.BRIGHT_CYAN}{name:<10}{RESET} {desc}")
+                lines.append(f"  {FG.BRIGHT_CYAN}{name:<12}{RESET} {desc}")
             lines.append("")
             lines.append(
-                "  ↑/↓ or PageUp/PageDown scrolls the transcript (ctrl+l jumps\n"
-                "  to the newest lines) · ctrl+p/ctrl+n recalls what you typed\n"
-                "  · Tab completes commands"
+                "  enter send · shift+enter newline · ↑/↓ scroll chat\n"
+                "  ctrl+p/ctrl+n recall history · esc interrupt\n"
+                "  tab autocomplete · pageup/pagedown fast scroll\n"
+                "  ctrl+l jump to newest · ctrl+c interrupt/quit"
             )
             with self.lock:
                 self.blocks.append(SystemBlock(text="\n".join(lines)))
@@ -1492,6 +1497,52 @@ class TuiApp:
             say(
                 "configured: "
                 f"{self.config.model}\navailable: {', '.join(models) or '(none listed)'}"
+            )
+            return True
+        if cmd == "/compact":
+            self.compact_tools = not self.compact_tools
+            with self.lock:
+                for block in self.tool_blocks:
+                    if block.status != "running":
+                        block.expanded = not self.compact_tools
+            say(f"tool details {'hidden' if self.compact_tools else 'shown'}")
+            return True
+        if cmd == "/context":
+            msg_count = len(self.messages)
+            user_msgs = sum(1 for m in self.messages if m.get("role") == "user")
+            assistant_msgs = sum(1 for m in self.messages if m.get("role") == "assistant")
+            tool_msgs = sum(1 for m in self.messages if m.get("role") == "tool")
+            total_chars = sum(
+                len(m.get("content", "") or "")
+                for m in self.messages
+                if isinstance(m.get("content"), str)
+            )
+            usage = self.last_usage or {}
+            prompt_tok = usage.get("prompt_tokens", 0)
+            comp_tok = usage.get("completion_tokens", 0)
+            total_tok = usage.get("total_tokens", 0) or (prompt_tok + comp_tok)
+            lines = [
+                f"session context",
+                f"  messages: {msg_count} ({user_msgs} user, {assistant_msgs} assistant, {tool_msgs} tool)",
+                f"  characters: {total_chars:,}",
+                f"  tokens: {_fmt_tokens(total_tok)} total ({_fmt_tokens(prompt_tok)}↑ {_fmt_tokens(comp_tok)}↓)" if total_tok else "  tokens: (not yet reported)",
+                f"  queued: {len(self._queued)}" if self._queued else "",
+            ]
+            say("\n".join(line for line in lines if line))
+            return True
+        if cmd == "/cost":
+            usage = self.last_usage or {}
+            prompt_tok = int(usage.get("prompt_tokens", 0) or 0)
+            comp_tok = int(usage.get("completion_tokens", 0) or 0)
+            total_tok = int(usage.get("total_tokens", 0) or 0) or (prompt_tok + comp_tok)
+            if not total_tok:
+                say("no token usage reported yet — send a message first", kind="warn")
+                return True
+            say(
+                f"token usage this session\n"
+                f"  prompt:     {prompt_tok:>8,} tokens\n"
+                f"  completion: {comp_tok:>8,} tokens\n"
+                f"  total:      {total_tok:>8,} tokens"
             )
             return True
         if cmd == "/plugins":

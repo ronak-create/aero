@@ -68,11 +68,6 @@ def clear_line() -> str:
     return "\033[2K"
 
 
-def scroll_region(top: int, bottom: int) -> str:
-    """Set the scrolling region, 1-indexed inclusive."""
-    return f"\033[{top};{bottom}r"
-
-
 # ------------------------------------------------------------------ text widths
 
 def char_width(ch: str) -> int:

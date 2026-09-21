@@ -27,7 +27,7 @@ from tools import load_plugins
 SESSIONS_DIR = Path(".termagent") / "sessions"
 
 HELP = """
-Slash commands:
+AERO slash commands:
   /exit, /quit          leave
   /clear                reset conversation history
   /save <name>          save this session to .termagent/sessions/<name>.json
@@ -106,7 +106,7 @@ def _run_repl_command(
         from tui import run_tui
 
         run_tui(client, config)
-        print(f"termagent -- model: {config.model}  base_url: {config.base_url}")
+        print(f"AERO.agent — model: {config.model}  endpoint: {config.base_url}")
         return True
     if cmd == "/save":
         if not rest:
@@ -242,10 +242,10 @@ def main() -> None:
         print(reply)
         return
 
-    print(f"termagent -- model: {config.model}  base_url: {config.base_url}")
+    print(f"AERO.agent — model: {config.model}  endpoint: {config.base_url}")
     print(f"  max_iterations={config.max_iterations}  timeout={config.request_timeout}s  "
           f"temperature={config.temperature}")
-    print("Type /help for commands, /exit to quit.\n")
+    print("Type /help for commands, /tui for full-screen mode, /exit to quit.\n")
 
     state = {"auto_approve": config.auto_approve}
     # A green dot marks the user's turn in the line REPL too, matching the TUI.
