@@ -1,12 +1,6 @@
 <div align="center">
 
-```
-      _    _____ ____   ___
-     / \  | ____|  _ \ / _ \
-    / _ \ |  _| | |_) | | | |
-   / ___ \| |___|  _ <| |_| |
-  /_/   \_\_____|_| \_\\___/
-```
+<img src="assets/aero-banner.png" alt="AERO" width="800">
 
 **A zero-dependency terminal coding agent.**
 
