@@ -14,6 +14,11 @@ tui_*_check.py
 tui_verify.*
 tests/_scratch_*/
 
+# Build / packaging artifacts.
+build/
+dist/
+*.egg-info/
+
 # OS/editor cruft.
 .DS_Store
 Thumbs.db
